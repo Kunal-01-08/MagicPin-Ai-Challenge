@@ -229,6 +229,30 @@ def compose(category: dict, merchant: dict, trigger: dict, customer: dict | None
                 rationale = "Uses the supplied pharmacy demand signals and avoids recommending an unrelated catalog offer."
                 return {"body": body, "cta": cta, "send_as": send_as,
                         "suppression_key": suppression, "rationale": rationale}
+            if kind == "ipl_match_today":
+                match_time = ""
+                try:
+                    start = datetime.fromisoformat(payload.get("match_time_iso", ""))
+                    match_time = start.strftime("%I:%M %p").lstrip("0").lower()
+                except (TypeError, ValueError):
+                    pass
+                venue = payload.get("venue")
+                orders = merchant.get("customer_aggregate") or {}
+                delivery = orders.get("delivery_orders_30d")
+                dine_in = orders.get("dine_in_orders_30d")
+                body = f"{greeting}, {event}"
+                if match_time:
+                    body += f" starts at {match_time}"
+                if venue:
+                    body += f" at {venue}"
+                body += "."
+                if isinstance(delivery, (int, float)) and isinstance(dine_in, (int, float)):
+                    body += f" Your last 30 days show {delivery:g} delivery orders vs {dine_in:g} dine-in."
+                body += " Want a match-night delivery post drafted before kickoff?"
+                cta = "binary_yes_no"
+                rationale = "Connects the supplied match time and venue to the restaurant's recent delivery mix without misapplying a weekday-limited offer."
+                return {"body": body, "cta": cta, "send_as": send_as,
+                        "suppression_key": suppression, "rationale": rationale}
             # Prefer a confirmed merchant offer; use catalog ideas only when
             # clearly framed as suggestions so we do not imply they are live.
             live_offers = [o.get("title") for o in merchant.get("offers", [])
@@ -289,18 +313,45 @@ def compose(category: dict, merchant: dict, trigger: dict, customer: dict | None
             body = f"{greeting}, supply alert for {payload.get('molecule', 'a listed product')}"
             if batches:
                 body += f"; affected batches: {batches}"
-            body += ". Please check the source notice before taking stock action."
-            cta = "none"
+            if payload.get("manufacturer"):
+                body += f" ({payload['manufacturer']})"
+            body += ". Please verify against the source notice before taking stock action. I can prepare a batch-check list; would that help?"
+            cta = "binary_yes_no"
         elif kind in {"active_planning_intent", "planning_intent"}:
             topic = str(payload.get("intent_topic", "the plan")).replace('_', ' ')
             if merchant.get("category_slug") == "gyms" and "kids yoga" in topic:
-                deliverable = "an age range, session outline, and parent-facing launch message"
+                history = merchant.get("conversation_history") or []
+                previous_idea = next((entry.get("body", "") for entry in reversed(history)
+                                      if entry.get("from") == "vera"
+                                      and "suggest " in entry.get("body", "").lower()
+                                      and "camp" in entry.get("body", "").lower()), "")
+                suggestion = ""
+                if previous_idea:
+                    match = re.search(r"\bsuggest\s+(.+?)(?:\.\s*Want me|$)", previous_idea, re.IGNORECASE)
+                    if match:
+                        suggestion = match.group(1).rstrip(". ")
+                if suggestion:
+                    body = (f"{greeting}, the earlier camp outline suggested {suggestion}. I can turn it into "
+                            "a parent-facing launch message and session plan. Should I draft from that outline "
+                            "or adjust a detail first?")
+                else:
+                    body = f"{greeting}, picking up your plan for {topic}. I can prepare an age range, session outline, and parent-facing launch message for your review. Shall I proceed?"
+                cta = "binary_yes_no"
             elif merchant.get("category_slug") == "restaurants" and "thali" in topic:
-                deliverable = "a package outline and enquiry message for nearby offices"
+                offers = merchant.get("offers") or []
+                thali_offer = next((offer.get("title") for offer in offers
+                                   if offer.get("status") == "active" and "thali" in offer.get("title", "").lower()), None)
+                previous_note = next((entry.get("body", "") for entry in reversed(merchant.get("conversation_history") or [])
+                                      if entry.get("from") == "vera" and "orders/day" in entry.get("body", "").lower()), "")
+                order_match = re.search(r"(\d+)\s+orders/day", previous_note, re.IGNORECASE)
+                product = thali_offer or "your weekday lunch thali"
+                proof = f"; our last note mentioned {order_match.group(1)} orders/day" if order_match else ""
+                body = (f"{greeting}, you asked what a corporate-bulk version of {product} could look like{proof}. "
+                        "I can draft the package outline and an enquiry message for nearby offices. Shall I start?")
+                cta = "binary_yes_no"
             else:
-                deliverable = "a first draft for your review"
-            body = f"{greeting}, picking up your plan for {topic}. I can prepare {deliverable} now and send it for your approval. Shall I proceed?"
-            cta = "binary_yes_no"
+                body = f"{greeting}, picking up your plan for {topic}. I can prepare a first draft for your review. Shall I proceed?"
+                cta = "binary_yes_no"
         elif kind == "winback_eligible":
             body = f"{greeting}, your profile has been inactive for {payload.get('days_since_expiry', 'a while')} days, while the context shows {payload.get('lapsed_customers_added_since_expiry', 'more')} lapsed customers. Want to see a simple restart plan?"
             cta = "binary_yes_no"
